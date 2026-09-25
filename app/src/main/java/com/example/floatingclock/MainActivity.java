@@ -122,4 +122,11 @@ public class MainActivity extends Activity {
     }
 
     private void sendAction(String action) {
-        startFg(new Intent(this, FloatingClockSer
+        startFg(new Intent(this, FloatingClockService.class).setAction(action));
+    }
+
+    private void startFg(Intent i) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i);
+        else startService(i);
+    }
+}
