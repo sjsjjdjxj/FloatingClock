@@ -7,6 +7,7 @@
 
     <application
         android:allowBackup="true"
+        android:icon="@drawable/my_icon"
         android:label="悬浮时钟"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light">
@@ -21,6 +22,7 @@
         <service
             android:name=".FloatingClockService"
             android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
