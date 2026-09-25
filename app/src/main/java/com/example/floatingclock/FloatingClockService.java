@@ -8,11 +8,13 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -51,6 +53,11 @@ public class FloatingClockService extends Service {
     private int startX, startY;
     private boolean dragging = false;
     private int touchSlop;
+    private int lastScreenWidth = 0;
+    private int lastScreenHeight = 0;
+
+    // ⭐ 优化：VSync 对齐，解决快速拖动卡顿
+    private boolean mLayoutPending = false;
 
     private Runnable ticker = new Runnable() {
         @Override
@@ -58,6 +65,19 @@ public class FloatingClockService extends Service {
             updateViews();
             long now = System.currentTimeMillis();
             handler.postDelayed(this, 1000L - (now % 1000L) + 20L);
+        }
+    };
+
+    // ⭐ 优化：将刷新窗口的操作合并到屏幕每一帧的刷新里
+    private final Runnable mUpdateLayoutRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (root != null && params != null) {
+                try {
+                    wm.updateViewLayout(root, params);
+                } catch (Exception ignored) {}
+            }
+            mLayoutPending = false;
         }
     };
 
@@ -120,6 +140,36 @@ public class FloatingClockService extends Service {
         super.onDestroy();
     }
 
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (root != null && params != null && lastScreenWidth > 0 && lastScreenHeight > 0) {
+            DisplayMetrics dm = new DisplayMetrics();
+            wm.getDefaultDisplay().getMetrics(dm);
+            int newWidth = dm.widthPixels;
+            int newHeight = dm.heightPixels;
+
+            params.x = (int) ((float) params.x * newWidth / lastScreenWidth);
+            params.y = (int) ((float) params.y * newHeight / lastScreenHeight);
+
+            int viewWidth = root.getWidth() > 0 ? root.getWidth() : 200;
+            int viewHeight = root.getHeight() > 0 ? root.getHeight() : 100;
+
+            if (params.x < 0) params.x = 0;
+            if (params.y < 0) params.y = 0;
+            if (params.x > newWidth - viewWidth) params.x = newWidth - viewWidth;
+            if (params.y > newHeight - viewHeight) params.y = newHeight - viewHeight;
+
+            try {
+                wm.updateViewLayout(root, params);
+            } catch (Exception ignored) {}
+
+            lastScreenWidth = newWidth;
+            lastScreenHeight = newHeight;
+            prefs.edit().putInt(Prefs.KEY_X, params.x).putInt(Prefs.KEY_Y, params.y).apply();
+        }
+    }
+
     private void addOverlay() {
         root = LayoutInflater.from(this).inflate(R.layout.floating_clock, null);
         tvTime = root.findViewById(R.id.tvTime);
@@ -142,6 +192,11 @@ public class FloatingClockService extends Service {
         params.x = prefs.getInt(Prefs.KEY_X, 30);
         params.y = prefs.getInt(Prefs.KEY_Y, 200);
 
+        DisplayMetrics dm = new DisplayMetrics();
+        wm.getDefaultDisplay().getMetrics(dm);
+        lastScreenWidth = dm.widthPixels;
+        lastScreenHeight = dm.heightPixels;
+
         if (prefs.getBoolean(Prefs.KEY_LOCKED, false)) {
             params.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         }
@@ -162,7 +217,10 @@ public class FloatingClockService extends Service {
                         startX = params.x;
                         startY = params.y;
                         dragging = false;
+                        // ⭐ 暂停时钟刷新，把性能全部让给拖动
+                        handler.removeCallbacks(ticker);
                         return true;
+
                     case MotionEvent.ACTION_MOVE:
                         float dx = e.getRawX() - downRawX;
                         float dy = e.getRawY() - downRawY;
@@ -172,17 +230,32 @@ public class FloatingClockService extends Service {
                         if (dragging) {
                             params.x = (int) (startX + dx);
                             params.y = (int) (startY + dy);
-                            try { wm.updateViewLayout(root, params); } catch (Exception ignored) {}
+
+                            // ⭐ 使用 postOnAnimation 对齐系统垂直同步，防止掉帧
+                            if (!mLayoutPending) {
+                                mLayoutPending = true;
+                                root.postOnAnimation(mUpdateLayoutRunnable);
+                            }
                         }
                         return true;
+
                     case MotionEvent.ACTION_UP:
                     case MotionEvent.ACTION_CANCEL:
                         if (dragging) {
+                            // 松开手指时，强制最终定位一次
+                            float dxUp = e.getRawX() - downRawX;
+                            float dyUp = e.getRawY() - downRawY;
+                            params.x = (int) (startX + dxUp);
+                            params.y = (int) (startY + dyUp);
+                            try { wm.updateViewLayout(root, params); } catch (Exception ignored) {}
+
                             prefs.edit().putInt(Prefs.KEY_X, params.x).putInt(Prefs.KEY_Y, params.y).apply();
                         } else if (e.getActionMasked() == MotionEvent.ACTION_UP) {
                             handleTap((int)e.getRawX(), (int)e.getRawY());
                         }
                         dragging = false;
+                        // ⭐ 恢复时钟刷新
+                        handler.post(ticker);
                         return true;
                 }
                 return false;
